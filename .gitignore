@@ -1,3 +1,15 @@
+# Documents
+_documents/*
+!_documents/.gitkeep
+
+# Data
+_data/*
+!_data/.gitkeep
+
+# Outputs
+_outputs/*
+!_outputs/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
