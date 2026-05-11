@@ -11,8 +11,15 @@ that fit in float32. Storing them as the default int64/float64 wastes
 exactly 2× the memory for no benefit at our data sizes.
 """
 
+import pathlib
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
+
+# Absolute path to _data/api_data/ resolved from this file's location so it
+# works regardless of the working directory uvicorn is started from.
+_API_DATA_DIR = pathlib.Path(__file__).parent.parent / "_data" / "api_data"
 
 
 # Columns that represent raw integer counts from the API.
@@ -164,3 +171,32 @@ def prepare_pipeline(raw_records: list[dict]) -> pd.DataFrame:
     df = clean_repo_metrics(df)
     df = optimize_memory(df)
     return df
+
+
+def save_pipeline_data(df: pd.DataFrame, label: str) -> None:
+    """
+    Persist a pipeline DataFrame to ``_data/api_data/`` as an Excel workbook.
+
+    Filename format: ``{label}_{YYYYMMDD_HHMMSS}.xlsx``
+
+    The ``label`` is used as a human-readable prefix so files are easy to
+    identify at a glance (e.g. ``analyze_owner_repo_20260511_183000.xlsx`` or
+    ``trending_python_20260511_183000.xlsx``).
+
+    The directory is created automatically if it does not exist.  Any I/O
+    error is swallowed silently so a disk issue never crashes the API.
+
+    Args:
+        df: The processed DataFrame to save (output of prepare_pipeline).
+        label: Short descriptive prefix for the filename.
+    """
+    try:
+        _API_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Sanitise label so it is safe as a filename component.
+        safe_label = label.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        path = _API_DATA_DIR / f"{safe_label}_{timestamp}.xlsx"
+        df.to_excel(path, index=False)
+    except Exception:
+        # Never let a save failure propagate to the HTTP response.
+        pass

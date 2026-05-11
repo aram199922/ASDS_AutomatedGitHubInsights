@@ -126,9 +126,9 @@ def _assign_verdict(hype: float, substance: float) -> tuple[str, str]:
     gap = abs(hype - substance)
     confidence = "High" if gap >= 2.5 else "Medium" if gap >= 1.0 else "Low"
 
-    if substance >= _SUBSTANCE_USEFUL_THRESHOLD:
+    if substance > _SUBSTANCE_USEFUL_THRESHOLD:
         verdict = "Useful"
-    elif hype >= _HYPE_DOMINANCE_THRESHOLD and substance < _SUBSTANCE_USEFUL_THRESHOLD:
+    elif hype >= _HYPE_DOMINANCE_THRESHOLD and substance <= _SUBSTANCE_USEFUL_THRESHOLD:
         verdict = "Just Hype"
     else:
         verdict = "Emerging"  # Too early to tell — neither score is decisive.
@@ -173,21 +173,3 @@ def score_repos(df: pd.DataFrame) -> list[RepoScore]:
 
     return scores
 
-
-def score_single_repo(raw_record: dict) -> RepoScore:
-    """
-    Score a single repository by wrapping it in a one-row DataFrame.
-
-    When only one repo is analyzed, z-scores all default to 0 (neutral),
-    so the verdict is based on the absolute weighted position rather than
-    relative comparison to peers.
-
-    Args:
-        raw_record: Raw metric dict for one repo from ingestion.fetch_repo_data().
-
-    Returns:
-        A RepoScore for the given repository.
-    """
-    df = pd.DataFrame([raw_record])
-    results = score_repos(df)
-    return results[0]

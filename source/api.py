@@ -2,9 +2,19 @@
 api.py — FastAPI application and route handlers.
 
 Exposes three endpoints:
-  GET /health                        → liveness check
-  GET /api/analyze?repo=owner/repo   → full pipeline for one repository
-  GET /api/trending?language=python&limit=10 → batch analysis of trending repos
+  GET /health
+      Liveness check.
+
+  GET /api/analyze?repo=owner/repo
+      Fetches full metrics for the given repository, then searches GitHub for
+      the top 10 most-starred repos sharing the same name and primary language.
+      Batch z-score statistical analysis runs only when at least 2 similar
+      repositories are found; otherwise only repo metadata is returned with a
+      note explaining why analysis was skipped.
+
+  GET /api/trending?language=python&limit=10
+      Fetches the top starred repositories for a language and scores all of
+      them relative to each other via z-score normalization.
 
 Each route is async end-to-end: the FastAPI handler awaits the ingestion
 coroutines, then calls the (synchronous but fast) processor and analyzer.
@@ -13,17 +23,35 @@ coroutines, then calls the (synchronous but fast) processor and analyzer.
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
-from source.analyzer import score_repos, score_single_repo
-from source.ingestion import fetch_repo_data, fetch_trending_repos
-from source.processor import prepare_pipeline
+from source.analyzer import score_repos
+from source.ingestion import fetch_repo_data, fetch_similar_repos, fetch_trending_repos
+from source.processor import prepare_pipeline, save_pipeline_data
 
 app = FastAPI(
     title="GitHub Insights API",
     description=(
-        "A digital scout that scans GitHub repositories and answers one question: "
-        "Is this software actually useful, or is it just getting empty attention?"
+        "Scans GitHub repositories and answers: **is this software actually useful, "
+        "or is it just getting empty attention?**\n\n"
+        "### How it works\n"
+        "1. `/api/analyze` fetches full metrics for a repository, detects its primary "
+        "language, then searches GitHub for the top 10 most-starred repositories "
+        "sharing the same name and language.\n"
+        "   - If **2 or more** similar repos are found, all repos (including yours) "
+        "are scored together using z-score normalisation so every score reflects "
+        "where a repo sits relative to its real peers.\n"
+        "   - If **fewer than 2** similar repos are found, statistical comparison is "
+        "meaningless and is skipped — only raw metadata is returned with a note.\n"
+        "2. `/api/trending` scores the top starred repos for a language against each other.\n\n"
+        "### Scoring\n"
+        "Each repository receives a **Hype Score** (0–10) and a **Substance Score** (0–10) "
+        "computed from z-score-normalised metrics:\n"
+        "- **Hype**: star velocity, raw star count\n"
+        "- **Substance**: commit consistency, issue resolution rate, "
+        "fork-substance ratio, contributor count\n\n"
+        "Verdict is **Useful** (substance > 5), **Just Hype** (hype dominates), "
+        "or **Emerging** (not enough signal yet)."
     ),
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -36,10 +64,10 @@ async def root() -> RedirectResponse:
 @app.get("/health", tags=["Meta"])
 async def health_check() -> dict:
     """
-    Liveness probe.
+    Liveness probe — confirms the service is running.
 
-    Returns a simple JSON payload confirming the service is running.
-    Useful for deployment health checks and quick smoke tests.
+    Returns `{"status": "ok"}`. Use this for deployment health checks or a
+    quick smoke test before making analysis requests.
     """
     return {"status": "ok", "service": "GitHub Insights API"}
 
@@ -48,30 +76,43 @@ async def health_check() -> dict:
 async def analyze_repo(
     repo: str = Query(
         ...,
-        description='Full repository name in "owner/repo" format.',
+        description=(
+            'Full repository name in **"owner/repo"** format. '
+            'Example: `fastapi/fastapi`, `aram199922/pothole_detection`.'
+        ),
         examples=["fastapi/fastapi"],
-    )
+    ),
 ) -> dict:
     """
-    Analyze a single GitHub repository and return a Hype vs. Substance verdict.
+    Analyze a repository and compare it against the top similar repos on GitHub.
 
-    The pipeline:
-    1. Concurrently fetches metadata, commit stats, issue counts, and
-       contributor data from four GitHub API endpoints (ingestion.py).
-    2. Builds and memory-optimizes a one-row pandas DataFrame (processor.py).
-    3. Scores the repo using z-score normalization and weighted composite
-       metrics (analyzer.py).
-    4. Returns a structured JSON payload with raw metrics and the verdict.
+    **Pipeline**
 
-    Args:
-        repo: GitHub repository in "owner/repo" format (e.g. "pytorch/pytorch").
+    1. Fetches repository metadata, last-year commit history, closed-issue count,
+       and contributor list — all four requests fire concurrently.
+    2. Detects the primary language from the metadata.
+    3. Searches GitHub for `{repo_name} language:"{lang}"` sorted by stars
+       (e.g. `pothole_detection language:"Jupyter Notebook"`).
+    4. **If 2 or more similar repos are found**: combines the source repo with
+       the similar repos into one batch, runs `prepare_pipeline` + `score_repos`
+       so every score reflects real peer comparison via z-score normalisation.
+       The processed DataFrame is saved to `_data/api_data/` as an Excel file
+       for offline inspection.
+    5. **If fewer than 2 similar repos are found**: statistical comparison is
+       skipped — z-scores across 0 or 1 peers are meaningless. Raw metadata is
+       returned with `scores: null` and a note in `similar_repos`.
 
-    Returns:
-        JSON object containing scores, verdict, confidence, and raw metrics.
+    **Returns**
 
-    Raises:
-        HTTPException 400: If the repo name is not in "owner/repo" format.
-        HTTPException 404: If the repository does not exist on GitHub.
+    - `repo`, `meta`, `raw_metrics` — always present.
+    - `verdict`, `confidence`, `scores` — present only when batch analysis ran
+      (i.e. at least 2 similar repos were found); `null` otherwise.
+    - `similar_repos` — ranked batch results when analysis ran; a short note
+      with the count when it was skipped; `null` when language is unknown.
+
+    **Errors**
+
+    - `400` — repo is not in `owner/repo` format.
     """
     if "/" not in repo or len(repo.split("/")) != 2:
         raise HTTPException(
@@ -81,25 +122,71 @@ async def analyze_repo(
 
     raw = await fetch_repo_data(repo)
 
-    if raw.get("stars") == 0 and raw.get("forks") == 0 and raw.get("open_issues") == 0:
-        # Stars/forks of exactly 0 on a missing repo vs. a legitimately new repo
-        # is ambiguous, but it's the best signal we have without a 404 status.
-        pass
+    language = raw.get("language") or ""
+    repo_name = repo.split("/")[1]
+    similar_section = None
+    result = None
 
-    result = score_single_repo(raw)
+    if language and language != "Unknown":
+        similar_raw = await fetch_similar_repos(repo_name=repo_name, language=language)
+        count = len(similar_raw)
+
+        if count < 2:
+            # Not enough peers — z-score comparison would be meaningless.
+            noun = "repository" if count == 1 else "repositories"
+            similar_section = {
+                "count": count,
+                "note": (
+                    f"Only {count} similar {noun} found. "
+                    "Statistical comparison requires at least 2 similar repositories."
+                ),
+            }
+        else:
+            # Source repo is first so all_scored[0] is always the source.
+            combined_raw = [raw] + similar_raw
+            df = prepare_pipeline(combined_raw)
+            save_pipeline_data(df, f"analyze_{repo.replace('/', '_')}")
+            all_scored = score_repos(df)
+
+            result = all_scored[0]
+            peer_scored = all_scored[1:]
+            ranked = sorted(peer_scored, key=lambda r: r.substance_score, reverse=True)
+
+            similar_section = {
+                "search_query": f'{repo_name} language:"{language}"',
+                "count": len(ranked),
+                "results": [
+                    {
+                        "rank": idx + 1,
+                        "repo": r.repo,
+                        "verdict": r.verdict,
+                        "confidence": r.confidence,
+                        "scores": {
+                            "hype_score": r.hype_score,
+                            "substance_score": r.substance_score,
+                        },
+                        "meta": {
+                            "language": r.language,
+                            "description": r.description,
+                            "html_url": r.html_url,
+                        },
+                    }
+                    for idx, r in enumerate(ranked)
+                ],
+            }
 
     return {
-        "repo": result.repo,
-        "verdict": result.verdict,
-        "confidence": result.confidence,
-        "scores": {
-            "hype_score": result.hype_score,
-            "substance_score": result.substance_score,
-        },
+        "repo": repo,
+        "verdict": result.verdict if result else None,
+        "confidence": result.confidence if result else None,
+        "scores": (
+            {"hype_score": result.hype_score, "substance_score": result.substance_score}
+            if result else None
+        ),
         "meta": {
-            "language": result.language,
-            "description": result.description,
-            "html_url": result.html_url,
+            "language": language or "Unknown",
+            "description": raw.get("description", ""),
+            "html_url": raw.get("html_url", ""),
         },
         "raw_metrics": {
             "stars": raw.get("stars"),
@@ -109,6 +196,7 @@ async def analyze_repo(
             "contributor_count": raw.get("contributor_count"),
             "repo_age_days": raw.get("repo_age_days"),
         },
+        "similar_repos": similar_section,
     }
 
 
@@ -116,37 +204,38 @@ async def analyze_repo(
 async def trending_repos(
     language: str = Query(
         default="python",
-        description="Programming language to filter trending repositories by.",
+        description=(
+            "Programming language to search by. Single-word values like `python` "
+            "or multi-word values like `Jupyter Notebook` are both supported."
+        ),
         examples=["python"],
     ),
     limit: int = Query(
         default=10,
         ge=1,
         le=30,
-        description="Number of repositories to analyze (1–30).",
+        description="Number of repositories to fetch and score (1–30, default 10).",
     ),
 ) -> dict:
     """
-    Fetch and score the top trending GitHub repositories for a given language.
+    Score the top most-starred GitHub repositories for a given programming language.
 
-    Unlike /api/analyze (single-repo, no relative comparison), this endpoint
-    runs z-score normalization across ALL repos in the batch simultaneously,
-    so each score reflects how a repo compares to its peers in the same
-    trending list.
+    All repositories are scored **relative to each other** using z-score
+    normalisation across the full batch, so a score of 7 means "notably above
+    the average of this peer group", not an absolute quality judgment.
 
-    The pipeline:
-    1. Searches GitHub for the most-starred repos pushed in the last 30 days.
-    2. Fetches full metrics for all repos concurrently (asyncio.gather).
-    3. Builds a multi-row DataFrame and optimizes memory.
-    4. Scores all repos relative to each other via z-score normalization.
-    5. Returns a ranked list sorted by substance score descending.
+    **Pipeline**
 
-    Args:
-        language: Programming language (default: "python").
-        limit: Number of repos to fetch and score (default: 10, max: 30).
+    1. Searches GitHub for `language:"{lang}"` sorted by stars descending.
+    2. Fetches full metrics for all repos concurrently.
+    3. Runs `prepare_pipeline` (clean + memory-optimise) then `score_repos`
+       (z-score normalise → weighted Hype/Substance scores → verdict).
+    4. Saves the processed DataFrame to `_data/api_data/` as an Excel file.
+    5. Returns results sorted by Substance Score descending.
 
-    Returns:
-        JSON object with a ranked list of scored repositories.
+    **Errors**
+
+    - `404` — no repositories found for the given language.
     """
     raw_records = await fetch_trending_repos(language=language, limit=limit)
 
@@ -157,9 +246,9 @@ async def trending_repos(
         )
 
     df = prepare_pipeline(raw_records)
+    save_pipeline_data(df, f"trending_{language}")
     scored = score_repos(df)
 
-    # Sort by substance score descending — most useful at the top.
     ranked = sorted(scored, key=lambda r: r.substance_score, reverse=True)
 
     return {

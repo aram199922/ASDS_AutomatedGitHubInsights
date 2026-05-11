@@ -107,38 +107,59 @@ Liveness check.
 ---
 
 ### `GET /api/analyze?repo=owner/repo`
-Analyze a single repository.
+Analyze a single repository and return its Hype vs. Substance verdict. Additionally, the endpoint automatically detects the repository's primary language, searches GitHub for `{repo_name} language:{lang}` sorted by stars (e.g. `pothole_detection language:Jupyter Notebook`), fetches the top 10 results, and runs the same batch z-score statistical analysis used by `/api/trending`. The ranked results appear in `similar_repos`.
 
 **Example:**
 ```
-GET http://127.0.0.1:8000/api/analyze?repo=fastapi/fastapi
+GET http://127.0.0.1:8000/api/analyze?repo=aram199922/pothole_detection
 ```
 
 **Response:**
 ```json
 {
-  "repo": "fastapi/fastapi",
-  "verdict": "Useful",
-  "confidence": "High",
+  "repo": "aram199922/pothole_detection",
+  "verdict": "Emerging",
+  "confidence": "Low",
   "scores": {
-    "hype_score": 6.4,
-    "substance_score": 8.1
+    "hype_score": 5.0,
+    "substance_score": 5.0
   },
   "meta": {
-    "language": "Python",
-    "description": "FastAPI framework, high performance...",
-    "html_url": "https://github.com/fastapi/fastapi"
+    "language": "Jupyter Notebook",
+    "description": "...",
+    "html_url": "https://github.com/aram199922/pothole_detection"
   },
   "raw_metrics": {
-    "stars": 89000,
-    "forks": 7600,
-    "open_issues": 210,
-    "total_issues": 4800,
-    "contributor_count": 740,
-    "repo_age_days": 2100
+    "stars": 3,
+    "forks": 1,
+    "open_issues": 0,
+    "total_issues": 0,
+    "contributor_count": 1,
+    "repo_age_days": 180
+  },
+  "similar_repos": {
+    "search_query": "pothole_detection language:Jupyter Notebook",
+    "count": 10,
+    "results": [
+      {
+        "rank": 1,
+        "repo": "org/pothole_detection",
+        "verdict": "Useful",
+        "confidence": "High",
+        "scores": { "hype_score": 4.8, "substance_score": 8.3 },
+        "meta": {
+          "language": "Jupyter Notebook",
+          "description": "...",
+          "html_url": "https://github.com/org/pothole_detection"
+        }
+      },
+      ...
+    ]
   }
 }
 ```
+
+`similar_repos` is `null` when the repository's primary language cannot be determined by GitHub.
 
 ---
 
