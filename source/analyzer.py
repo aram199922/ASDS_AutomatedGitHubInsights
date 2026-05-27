@@ -172,4 +172,3 @@ def score_repos(df: pd.DataFrame) -> list[RepoScore]:
         ))
 
     return scores
-

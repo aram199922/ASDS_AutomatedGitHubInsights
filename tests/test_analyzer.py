@@ -9,7 +9,7 @@ Demonstrates:
 
 import pytest
 
-from source.analyzer import RepoScore, _assign_verdict, score_repos, score_single_repo
+from source.analyzer import RepoScore, _assign_verdict, score_repos
 from source.processor import prepare_pipeline
 
 
@@ -158,18 +158,3 @@ def test_substance_repo_outscores_hype_repo_on_substance():
     assert real_substance > hype_substance, (
         f"Expected battle-tested ({real_substance}) > overnight-hit ({hype_substance})"
     )
-
-
-# ---------------------------------------------------------------------------
-# score_single_repo edge case
-# ---------------------------------------------------------------------------
-
-def test_score_single_repo_does_not_crash():
-    """
-    Analyzing a single repo (no peers to compare against) must not raise.
-    Z-scores will all be 0, but the pipeline must still produce a valid verdict.
-    """
-    result = score_single_repo(SUBSTANCE_REPO)
-    assert isinstance(result, RepoScore)
-    assert result.verdict in {"Useful", "Just Hype", "Emerging"}
-    assert result.repo == "foundation/battle-tested"

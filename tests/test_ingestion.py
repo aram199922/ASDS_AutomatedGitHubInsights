@@ -33,6 +33,7 @@ def _make_response(status: int, json_data) -> MagicMock:
     mock_resp = AsyncMock()
     mock_resp.status = status
     mock_resp.json = AsyncMock(return_value=json_data)
+    mock_resp.headers = {}  # Non-async dict for response.headers.get()
 
     # Make it usable as `async with session.get(...) as response`
     cm = MagicMock()
